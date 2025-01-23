@@ -1,0 +1,1629 @@
+# %%
+import pandas as pd 
+import numpy as np 
+import jieba
+import paddlenlp
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_curve, roc_auc_score, auc
+from sklearn.preprocessing import label_binarize
+import matplotlib.pyplot as plt
+# from sklearn.metrics import accuracy_score
+# from sklearn.tree import DecisionTreeClassifier
+# from sklearn.svm import SVC
+# #from keras.preprocessing.sequence import pad_sequences
+# # from keras.models import Sequential
+# # from keras.layers import Embedding, LSTM, Dense
+import requests
+import urllib3
+import json
+import sys
+import re
+from pylab import *
+mpl.rcParams['font.sans-serif'] = ['SimHei']
+import os 
+
+# %%
+# def read_csv(file_path):
+#     return pd.read_csv(file_path)
+
+# def tokenize(text):
+#     return list(jieba.cut(text))
+
+# %%
+
+    
+
+# %%
+# ak = 'UIPpUw5Tsytb51TE3wN6Kve2'
+# sk = 'V8fSJNvzJ7ZwB39bVIrHSf9eHbpDhCcZ'
+ 
+# host = 'https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={}&client_secret={}'.format(ak,sk)
+ 
+# res = requests.post(host)
+# print(res.text)
+
+# %%
+# access_token = "24.aab2c2d5ed9f4064f10c6883578d2f25.2592000.1713019534.282335-56521734"
+# http = urllib3.PoolManager()
+
+# url = 'https://aip.baidubce.com/rpc/2.0/nlp/v1/sentiment_classify?access_token=' + access_token
+
+
+# %%
+# Ernie 模型分词器
+from paddlenlp.transformers import ErnieTokenizer
+# Ernie 文本分类模型
+from paddlenlp.transformers import ErnieForSequenceClassification
+# Paddle 加载数据集
+from paddlenlp.datasets import load_dataset
+# Paddle 数据加载器
+from paddle.io import DataLoader
+from paddlenlp.transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+import paddle
+import paddle.nn as nn
+# 进度条
+from tqdm import tqdm
+# 动态学习率
+from paddlenlp.transformers import LinearDecayWithWarmup
+from paddlenlp.transformers import ConstScheduleWithWarmup
+# 优化方法
+from paddle.optimizer import AdamW
+from paddle.optimizer import SGD
+from paddle.optimizer import Momentum
+# 损失函数
+from paddle.nn import CrossEntropyLoss
+# 评估函数
+from paddle.metric import Accuracy
+# 功能函数
+import paddle.nn.functional as F
+# 读写目录
+import glob
+import math
+from sklearn.metrics import confusion_matrix, roc_curve,auc,f1_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# 预训练模型参数
+# checkpoint = 'ernie-3.0-medium-zh'
+# checkpoint = 'bert-wwm-chinese'
+# checkpoint = 'gpt-cpm-large-cn'
+checkpoint = 'ernie-3.0-mini-zh'
+
+# 设置默认计算设备, 对于 GPU 版本的 Paddle 默认设备就是 GPU
+paddle.device.set_device('gpu:0')
+
+# %%
+paddle.utils.run_check()
+
+# %%
+df = pd.read_csv("/home/aistudio/data/data_train_last_balanced.csv")
+mask = df['标题'].str.contains('\t|\n', regex=True, na=False)
+df = df[~mask]
+df = df.loc[:,['标题','情感']]
+train_df, valid_df = train_test_split(df, test_size=0.2, random_state=42,stratify=df['情感'])
+train_df.to_csv("train.txt",sep='\t',index=False,header=False)
+valid_df.to_csv("dev.txt",sep='\t',index=False,header=False)
+
+# %%
+df_2 = pd.read_csv("/home/aistudio/data/data_train_two_balanced.csv")
+mask = df_2['标题'].str.contains('\t|\n', regex=True, na=False)
+df_2 = df_2[~mask]
+df_2 = df_2.loc[:,['标题','情感']]
+train_df_2, valid_df_2 = train_test_split(df_2, test_size=0.2, random_state=42,stratify=df_2['情感'])
+train_df_2.to_csv("train2.txt",sep='\t',index=False,header=False)
+valid_df_2.to_csv("dev2.txt",sep='\t',index=False,header=False)
+
+# %%
+from paddlenlp.datasets import MapDataset
+
+def read(data_path):
+    with open(data_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            parts = line.strip().split('\t')  # 假设文本和标签由tab分隔
+            if len(parts) == 2:  # 确保每行都是文本跟随标签
+                yield {'text': parts[0], 'label': int(parts[1])}
+            else:
+                continue  # 忽略格式不正确的行
+
+def load_my_dataset(data_path):
+    # 使用MapDataset加载数据
+    return MapDataset(list(read(data_path)))
+
+# %%
+# data_path为read()方法的参数
+train_ds = load_my_dataset(data_path='train.txt')
+dev_ds = load_my_dataset(data_path='dev.txt')
+
+# %%
+train_ds_2 = load_my_dataset(data_path='train2.txt')
+dev_ds_2 = load_my_dataset(data_path='dev2.txt')
+
+# %%
+for i in range(5):
+    print(train_ds[i])
+
+# %%
+tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+def load_data(batch_size=8):
+    def collate_fn(batch_data):
+        batch_inputs = []
+        batch_labels = []
+        # data 格式:
+        for data in batch_data:
+            batch_inputs.append(data['text'])
+            batch_labels.append(data['label'])
+        # 文本数据分词、编码
+        batch_inputs = tokenizer(batch_inputs,
+                                 padding=True,
+                                 truncation=True,
+                                 max_length=510,
+                                 add_special_tokens=True,
+                                 return_tensors='pd')
+        # 标签转换为 Paddle 张量
+        batch_labels = paddle.to_tensor(batch_labels)
+        return batch_inputs, batch_labels
+
+    params = {'batch_size': batch_size, 'collate_fn': collate_fn}
+    train_dataloader = DataLoader(train_ds, **params, shuffle=False)
+    dev_dataloader = DataLoader(dev_ds, **params, shuffle=False)
+    return train_dataloader, dev_dataloader
+
+def test01():
+    train_dataloader, _ = load_data()
+    for batch_inputs, batch_labels in tqdm(train_dataloader):
+        print('标签数量:', len(batch_labels))
+        print('输入编码:', batch_inputs['input_ids'])
+        break
+
+# %%
+def remove_stopwords(text, stopwords):
+    words = jieba.cut(text, use_paddle=True)
+    filtered_words = [word for word in words if word not in stopwords]
+    return " ".join(filtered_words)
+
+# 加载停用词
+with open("/home/aistudio/data/stopwords_cn.txt", "r", encoding="utf-8") as f:
+    stopwords = [line.strip() for line in f.readlines()]
+
+def preprocess_dataset(dataset):
+    clean_dataset = []
+    for data in dataset:
+        text = data['text']
+        label = data['label']
+        cleaned_text = remove_stopwords(text, stopwords)
+        clean_dataset.append({'text': cleaned_text, 'label': label})
+    return clean_dataset
+print("原始数据样本:", train_ds[0])
+
+# 对数据集进行预处理
+train_data_clean = preprocess_dataset(train_ds)
+dev_data_clean = preprocess_dataset(dev_ds)
+print("处理后的数据样本:", train_data_clean[0])
+def load_data_stopwords(batch_size=8):
+    def collate_fn(batch_data):
+        batch_inputs = []
+        batch_labels = []
+        for data in batch_data:
+            batch_inputs.append(data['text'])
+            batch_labels.append(data['label'])
+        batch_inputs = tokenizer(batch_inputs,
+                                 padding=True,
+                                 truncation=True,
+                                 max_length=510,
+                                 add_special_tokens=True,
+                                 return_tensors='pd')
+        batch_labels = paddle.to_tensor(batch_labels)
+        return batch_inputs, batch_labels
+
+    params = {'batch_size': batch_size, 'collate_fn': collate_fn}
+    train_dataloader_3 = DataLoader(train_data_clean, **params, shuffle=False)
+    dev_dataloader_3 = DataLoader(dev_data_clean, **params, shuffle=False)
+    return train_dataloader_3, dev_dataloader_3
+
+train_dataloader_3, dev_dataloader_3 = load_data_stopwords(batch_size=8)
+for batch_inputs, batch_labels in train_dataloader_3:
+    print('批处理数据样本:', batch_inputs['input_ids'][0])  # 显示第一个批处理的样本
+    print('对应标签:', batch_labels[0])
+    break
+
+# %%
+tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+def load_data_2(batch_size=8):
+    def collate_fn(batch_data):
+        batch_inputs = []
+        batch_labels = []
+        # data 格式:
+        for data in batch_data:
+            batch_inputs.append(data['text'])
+            batch_labels.append(data['label'])
+        # 文本数据分词、编码
+        batch_inputs = tokenizer(batch_inputs,
+                                 padding=True,
+                                 truncation=True,
+                                 max_length=510,
+                                 add_special_tokens=True,
+                                 return_tensors='pd')
+        # 标签转换为 Paddle 张量
+        batch_labels = paddle.to_tensor(batch_labels)
+        return batch_inputs, batch_labels
+
+    params = {'batch_size': batch_size, 'collate_fn': collate_fn}
+    train_dataloader_2 = DataLoader(train_ds_2, **params, shuffle=False)
+    dev_dataloader_2 = DataLoader(dev_ds_2, **params, shuffle=False)
+    return train_dataloader_2, dev_dataloader_2
+
+def test02():
+    train_dataloader_2, _ = load_data()
+    for batch_inputs, batch_labels in tqdm(train_dataloader_2):
+        print('标签数量:', len(batch_labels))
+        print('输入编码:', batch_inputs['input_ids'])
+        break
+
+# %%
+test01()
+
+# %%
+test02()
+
+# %%
+from paddlenlp.transformers import ConstScheduleWithWarmup
+import matplotlib.pyplot as plt
+
+
+if __name__ == '__main__':
+
+    scheduler = ConstScheduleWithWarmup(learning_rate=1,
+                                        total_steps=1000, 
+                                        warmup=0.1)
+    learning_rates = []
+    for _ in range(1000):
+        learning_rates.append(scheduler.get_lr())
+        scheduler.step()
+
+    plt.plot(range(1000), learning_rates)
+    plt.show()
+
+# %%
+def plot_roc_curve(y_true, y_score, n_classes=3):
+    # 计算每一类的ROC
+    y_true = label_binarize(y_true, classes=[i for i in range(n_classes)])
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
+
+    for i in range(n_classes):
+        fpr[i], tpr[i], _ = roc_curve(y_true[:, i], y_score[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
+
+
+    for i in range(n_classes):
+        plt.plot(fpr[i], tpr[i], label=f'Class {i} (area = {roc_auc[i]:.2f})')
+
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend(loc="lower right")
+
+# %%
+# paddle.save(model.state_dict(), 'model_state.pdparams')
+# paddle.save(optimizer.state_dict(), 'optimizer.optparams')
+# paddle.save(scheduler.state_dict(), 'scheduler.optparams')
+# tokenizer.save_pretrained('./')
+# import json
+
+# model_config = model.get_config()  # 假设这个方法返回模型配置的字典
+# with open('model_config.json', 'w') as f:
+#     json.dump(model_config, f)
+# for epoch in range(total_epochs):
+#     # ...训练过程...
+#     if should_save(epoch):  # 自定义的保存条件
+#         paddle.save(model.state_dict(), f'senti-{epoch}-{score}.pdparams')
+
+# %%
+import paddle.nn as nn
+class CustomDropoutLayer(nn.Layer):
+    def __init__(self, dropout_prob=0.5):
+        super(CustomDropoutLayer, self).__init__()
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, inputs):
+        return {key: self.dropout(val) if key == 'input_ids' and val.dtype in [paddle.float32, paddle.float64] else val for key, val in inputs.items()}
+
+
+# %%
+def train_model_adam(checkpoint, num_epoch, learning_rate, batch_size, accumulation_steps):
+
+    # **************************初始化训练对象***************************
+    # 加载数据集
+    train_set, valid_set = load_data()
+    # 初始化模型
+    estimator = AutoModelForSequenceClassification.from_pretrained(checkpoint,
+                                                               num_classes=3)
+
+    # 动态学习率
+    scheduler = LinearDecayWithWarmup(learning_rate=learning_rate,
+                                        total_steps=len(train_set)*num_epoch,
+                                        warmup=0.1
+                                        )
+    # scheduler = ConstScheduleWithWarmup(learning_rate=learning_rate,
+    #                                 total_steps=len(train_set)*num_epoch,
+    #                                 warmup=0.1
+    #                                 )
+    # 优化方法
+    optimizer = AdamW(parameters=estimator.parameters(),
+                      learning_rate=scheduler,weight_decay=0.1)
+    # 损失函数
+    criterion = CrossEntropyLoss(use_softmax=True)
+    # 评估方法
+    metric = Accuracy()
+    # 初始化存储数组
+    train_losses = []
+    valid_losses = []
+    valid_accuracies = []
+    f1_scores = []
+    auc_scores = []
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    custom_dropout = CustomDropoutLayer(dropout_prob=0.5)
+    # 训练逻辑
+    for epoch_idx in range(num_epoch):
+
+        # **************************训练集训练*************************
+        optimizer.clear_grad()
+        progress = tqdm(range(len(train_set)),
+                        desc='epoch %2d' % (epoch_idx + 1))
+        total_loss = 0.0  # 轮次损失
+        stage_loss = 0.0  # 阶段损失
+        for iter_idx, (batch_inputs, batch_labels) in enumerate(train_set):
+            batch_inputs = custom_dropout(batch_inputs)
+            # 模型计算
+            outputs = estimator(**batch_inputs)
+            # 损失计算
+            loss = criterion(outputs, batch_labels)
+            # 训练信息
+            total_loss += loss.item() * len(batch_labels)
+            stage_loss += loss.item() * len(batch_labels)
+            # 梯度计算
+            (loss / accumulation_steps).backward()
+
+            # 参数更新
+            if iter_idx % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.clear_grad()
+                progress.set_description('epoch % 2d stage loss %.5f'
+                                         % (epoch_idx + 1, stage_loss))
+                stage_loss = 0.0
+            # 学习率更新
+            scheduler.step()
+            # 进度条更新
+            progress.update()
+
+        # 设置轮次损失
+        progress.set_description('epoch % 2d total loss %.5f'
+                                 % (epoch_idx + 1, total_loss))
+        average_loss = total_loss / len(train_set)
+        train_losses.append(average_loss)
+        # 关闭进度条
+        progress.close()
+
+        # **************************验证集评估*************************
+        with paddle.no_grad():
+            total_valid_loss = 0
+            progress = tqdm(range(len(valid_set)), desc='evaluate')
+            metric.reset()
+
+            for iter_idx, (batch_inputs, batch_labels) in enumerate(valid_set):
+                # 模型计算
+                outputs = estimator(**batch_inputs)
+                loss = criterion(outputs,batch_labels)
+                total_valid_loss += loss.item()* len(batch_labels)
+                # 计算概率
+                probas = F.softmax(outputs)
+                #获取预测标签
+                preds = paddle.argmax(probas,axis=1)
+                #保存预测和真实标签
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.numpy())
+                all_probs.extend(probas.numpy())
+                # 标签预测
+                correct = metric.compute(probas, batch_labels)
+                metric.update(correct)
+                
+                # 进度条更新
+                progress.update()
+
+            f1 = f1_score(all_labels,all_preds,average='weighted')
+            f1_scores.append(f1)
+
+            # 设置轮次损失
+            acc = metric.accumulate()
+            valid_accuracies.append(acc)
+            average_valid_loss = total_valid_loss / len(valid_set)
+            valid_losses.append(average_valid_loss)
+            progress.set_description('evaluate acc %.3f' % acc)
+            
+            progress.set_description('evaluate valid_loss %.3f' % total_valid_loss)
+
+            # 关闭进度条
+            progress.close()
+
+            #模型保存
+            model_params = {
+            'checkpoint': checkpoint,
+            'num_epoch': num_epoch,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'accumulation_steps': accumulation_steps,
+            'train_loss': train_losses,
+            'valid_loss': valid_losses,
+            'valid_accuracy': valid_accuracies,
+            'f1_score': f1_scores,
+            }
+            model_save_dir = 'model/saved_parameters'
+            paddle.save(model_params,f'{model_save_dir}_{checkpoint}_lr{learning_rate}_bs{batch_size}_epochs{num_epoch}.pdparams')
+
+
+    # 在函数的最后，绘制损失和准确率图像
+    plt.figure(figsize=(16, 8))
+
+    # 绘制训练损失图像
+    plt.subplot(2, 3, 1)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(valid_losses,label='Validation Loss',linestyle='--')
+    plt.title('Training and Validation Loss Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # 绘制验证准确率图像
+    plt.subplot(2, 3, 2)
+    plt.plot(valid_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    #绘制混淆矩阵
+    plt.subplot(2,3,3)
+    cm =confusion_matrix(all_labels,all_preds)
+    sns.heatmap(cm,annot=True,fmt="d",cmap="Blues",xticklabels=['Negative_preds', 'Middle_preds', 'Positive_preds'], yticklabels=['Negative_actual', 'Middle_actual', 'Positive_actual'])
+    plt.xticks(rotation=45) 
+    plt.yticks(rotation=45)
+    
+    #绘制ROC曲线
+    plt.subplot(2,3,4)
+    all_probs = np.array(all_probs)
+    plot_roc_curve(all_labels,all_probs)
+
+
+    #绘制F1分数
+    plt.subplot(2,3,5)
+    plt.plot(f1_scores,label='F1 Score',color='purple')
+    plt.title('F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+def train_model_adam_2(checkpoint, num_epoch, learning_rate, batch_size, accumulation_steps):
+
+    # **************************初始化训练对象***************************
+    # 加载数据集
+    train_set, valid_set = load_data_2()
+    # 初始化模型
+    estimator = AutoModelForSequenceClassification.from_pretrained(checkpoint,
+                                                               num_classes=3)
+
+    # 动态学习率
+    scheduler = LinearDecayWithWarmup(learning_rate=learning_rate,
+                                        total_steps=len(train_set)*num_epoch,
+                                        warmup=0.1
+                                        )
+    # scheduler = ConstScheduleWithWarmup(learning_rate=learning_rate,
+    #                                 total_steps=len(train_set)*num_epoch,
+    #                                 warmup=0.1
+    #                                 )
+    # 优化方法
+    optimizer = AdamW(parameters=estimator.parameters(),
+                      learning_rate=scheduler,weight_decay=0.1)
+    # 损失函数
+    criterion = CrossEntropyLoss(use_softmax=True)
+    # 评估方法
+    metric = Accuracy()
+    # 初始化存储数组
+    train_losses = []
+    valid_losses = []
+    valid_accuracies = []
+    f1_scores = []
+    auc_scores = []
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    custom_dropout = CustomDropoutLayer(dropout_prob=0.5)
+    # 训练逻辑
+    for epoch_idx in range(num_epoch):
+
+        # **************************训练集训练*************************
+        optimizer.clear_grad()
+        progress = tqdm(range(len(train_set)),
+                        desc='epoch %2d' % (epoch_idx + 1))
+        total_loss = 0.0  # 轮次损失
+        stage_loss = 0.0  # 阶段损失
+        for iter_idx, (batch_inputs, batch_labels) in enumerate(train_set):
+            batch_inputs = custom_dropout(batch_inputs)
+            # 模型计算
+            outputs = estimator(**batch_inputs)
+            # 损失计算
+            loss = criterion(outputs, batch_labels)
+            # 训练信息
+            total_loss += loss.item() * len(batch_labels)
+            stage_loss += loss.item() * len(batch_labels)
+            # 梯度计算
+            (loss / accumulation_steps).backward()
+
+            # 参数更新
+            if iter_idx % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.clear_grad()
+                progress.set_description('epoch % 2d stage loss %.5f'
+                                         % (epoch_idx + 1, stage_loss))
+                stage_loss = 0.0
+            # 学习率更新
+            scheduler.step()
+            # 进度条更新
+            progress.update()
+
+        # 设置轮次损失
+        progress.set_description('epoch % 2d total loss %.5f'
+                                 % (epoch_idx + 1, total_loss))
+        average_loss = total_loss / len(train_set)
+        train_losses.append(average_loss)
+        # 关闭进度条
+        progress.close()
+
+        # **************************验证集评估*************************
+        with paddle.no_grad():
+            total_valid_loss = 0
+            progress = tqdm(range(len(valid_set)), desc='evaluate')
+            metric.reset()
+
+            for iter_idx, (batch_inputs, batch_labels) in enumerate(valid_set):
+                # 模型计算
+                outputs = estimator(**batch_inputs)
+                loss = criterion(outputs,batch_labels)
+                total_valid_loss += loss.item()* len(batch_labels)
+                # 计算概率
+                probas = F.softmax(outputs)
+                #获取预测标签
+                preds = paddle.argmax(probas,axis=1)
+                #保存预测和真实标签
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.numpy())
+                all_probs.extend(probas.numpy())
+                # 标签预测
+                correct = metric.compute(probas, batch_labels)
+                metric.update(correct)
+                
+                # 进度条更新
+                progress.update()
+
+            f1 = f1_score(all_labels,all_preds,average='weighted')
+            f1_scores.append(f1)
+
+            # 设置轮次损失
+            acc = metric.accumulate()
+            valid_accuracies.append(acc)
+            average_valid_loss = total_valid_loss / len(valid_set)
+            valid_losses.append(average_valid_loss)
+            progress.set_description('evaluate acc %.3f' % acc)
+            
+            progress.set_description('evaluate valid_loss %.3f' % total_valid_loss)
+
+            # 关闭进度条
+            progress.close()
+
+            #模型保存
+            model_params = {
+            'checkpoint': checkpoint,
+            'num_epoch': num_epoch,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'accumulation_steps': accumulation_steps,
+            'train_loss': train_losses,
+            'valid_loss': valid_losses,
+            'valid_accuracy': valid_accuracies,
+            'f1_score': f1_scores,
+            }
+            model_save_dir = 'model/saved_parameters'
+            paddle.save(model_params,f'{model_save_dir}_model/senti_{checkpoint}_lr{learning_rate}_bs{batch_size}_epochs{num_epoch}.pdparams')
+            if not os.path.exists(model_save_dir):
+                os.makedirs(model_save_dir)
+            estimator.save_pretrained(model_save_dir)
+            tokenizer.save_pretrained(model_save_dir)
+            paddle.save(optimizer.state_dict(), os.path.join(model_save_dir, 'optimizer.optparams'))
+            paddle.save(scheduler.state_dict(), os.path.join(model_save_dir, 'scheduler.optparams'))
+
+    # 在函数的最后，绘制损失和准确率图像
+    plt.figure(figsize=(16, 8))
+
+    # 绘制训练损失图像
+    plt.subplot(2, 3, 1)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(valid_losses,label='Validation Loss',linestyle='--')
+    plt.title('Training and Validation Loss Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # 绘制验证准确率图像
+    plt.subplot(2, 3, 2)
+    plt.plot(valid_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    #绘制混淆矩阵
+    plt.subplot(2,3,3)
+    cm =confusion_matrix(all_labels,all_preds)
+    sns.heatmap(cm,annot=True,fmt="d",cmap="Blues",xticklabels=['Negative_preds', 'Middle_preds', 'Positive_preds'], yticklabels=['Negative_actual', 'Middle_actual', 'Positive_actual'])
+    plt.xticks(rotation=45) 
+    plt.yticks(rotation=45)
+    
+    #绘制ROC曲线
+    plt.subplot(2,3,4)
+    all_probs = np.array(all_probs)
+    plot_roc_curve(all_labels,all_probs)
+
+
+    #绘制F1分数
+    plt.subplot(2,3,5)
+    plt.plot(f1_scores,label='F1 Score',color='purple')
+    plt.title('F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+def train_model_adam_3(checkpoint, num_epoch, learning_rate, batch_size, accumulation_steps):
+
+    # **************************初始化训练对象***************************
+    # 加载数据集
+    train_set, valid_set = load_data_stopwords()
+    # 初始化模型
+    estimator = AutoModelForSequenceClassification.from_pretrained(checkpoint,
+                                                               num_classes=2)
+
+    # 动态学习率
+    scheduler = LinearDecayWithWarmup(learning_rate=learning_rate,
+                                        total_steps=len(train_set)*num_epoch,
+                                        warmup=0.1
+                                        )
+    # scheduler = ConstScheduleWithWarmup(learning_rate=learning_rate,
+    #                                 total_steps=len(train_set)*num_epoch,
+    #                                 warmup=0.1
+    #                                 )
+    # 优化方法
+    optimizer = AdamW(parameters=estimator.parameters(),
+                      learning_rate=scheduler,weight_decay=0.1)
+    # 损失函数
+    criterion = CrossEntropyLoss(use_softmax=True)
+    # 评估方法
+    metric = Accuracy()
+    # 初始化存储数组
+    train_losses = []
+    valid_losses = []
+    valid_accuracies = []
+    f1_scores = []
+    auc_scores = []
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    custom_dropout = CustomDropoutLayer(dropout_prob=0.5)
+    # 训练逻辑
+    for epoch_idx in range(num_epoch):
+
+        # **************************训练集训练*************************
+        optimizer.clear_grad()
+        progress = tqdm(range(len(train_set)),
+                        desc='epoch %2d' % (epoch_idx + 1))
+        total_loss = 0.0  # 轮次损失
+        stage_loss = 0.0  # 阶段损失
+        for iter_idx, (batch_inputs, batch_labels) in enumerate(train_set):
+            batch_inputs = custom_dropout(batch_inputs)
+            # 模型计算
+            outputs = estimator(**batch_inputs)
+            # 损失计算
+            loss = criterion(outputs, batch_labels)
+            # 训练信息
+            total_loss += loss.item() * len(batch_labels)
+            stage_loss += loss.item() * len(batch_labels)
+            # 梯度计算
+            (loss / accumulation_steps).backward()
+
+            # 参数更新
+            if iter_idx % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.clear_grad()
+                progress.set_description('epoch % 2d stage loss %.5f'
+                                         % (epoch_idx + 1, stage_loss))
+                stage_loss = 0.0
+            # 学习率更新
+            scheduler.step()
+            # 进度条更新
+            progress.update()
+
+        # 设置轮次损失
+        progress.set_description('epoch % 2d total loss %.5f'
+                                 % (epoch_idx + 1, total_loss))
+        average_loss = total_loss / len(train_set)
+        train_losses.append(average_loss)
+        # 关闭进度条
+        progress.close()
+
+        # **************************验证集评估*************************
+        with paddle.no_grad():
+            total_valid_loss = 0
+            progress = tqdm(range(len(valid_set)), desc='evaluate')
+            metric.reset()
+
+            for iter_idx, (batch_inputs, batch_labels) in enumerate(valid_set):
+                # 模型计算
+                outputs = estimator(**batch_inputs)
+                loss = criterion(outputs,batch_labels)
+                total_valid_loss += loss.item()* len(batch_labels)
+                # 计算概率
+                probas = F.softmax(outputs)
+                #获取预测标签
+                preds = paddle.argmax(probas,axis=1)
+                #保存预测和真实标签
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.numpy())
+                all_probs.extend(probas.numpy())
+                # 标签预测
+                correct = metric.compute(probas, batch_labels)
+                metric.update(correct)
+                
+                # 进度条更新
+                progress.update()
+
+            f1 = f1_score(all_labels,all_preds,average='weighted')
+            f1_scores.append(f1)
+
+            # 设置轮次损失
+            acc = metric.accumulate()
+            valid_accuracies.append(acc)
+            average_valid_loss = total_valid_loss / len(valid_set)
+            valid_losses.append(average_valid_loss)
+            progress.set_description('evaluate acc %.3f' % acc)
+            
+            progress.set_description('evaluate valid_loss %.3f' % total_valid_loss)
+
+            # 关闭进度条
+            progress.close()
+
+            #模型保存
+            model_params = {
+            'checkpoint': checkpoint,
+            'num_epoch': num_epoch,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'accumulation_steps': accumulation_steps,
+            'train_loss': train_losses,
+            'valid_loss': valid_losses,
+            'valid_accuracy': valid_accuracies,
+            'f1_score': f1_scores,
+            }
+            model_save_dir = 'model/saved_parameters'
+            paddle.save(model_params,f'{model_save_dir}_{checkpoint}_lr{learning_rate}_bs{batch_size}_epochs{num_epoch}.pdparams')
+
+
+    # 在函数的最后，绘制损失和准确率图像
+    plt.figure(figsize=(16, 8))
+
+    # 绘制训练损失图像
+    plt.subplot(2, 3, 1)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(valid_losses,label='Validation Loss',linestyle='--')
+    plt.title('Training and Validation Loss Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # 绘制验证准确率图像
+    plt.subplot(2, 3, 2)
+    plt.plot(valid_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    #绘制混淆矩阵
+    plt.subplot(2,3,3)
+    cm =confusion_matrix(all_labels,all_preds)
+    sns.heatmap(cm,annot=True,fmt="d",cmap="Blues",xticklabels=['Negative_preds', 'Middle_preds', 'Positive_preds'], yticklabels=['Negative_actual', 'Middle_actual', 'Positive_actual'])
+    plt.xticks(rotation=45) 
+    plt.yticks(rotation=45)
+    
+    #绘制ROC曲线
+    plt.subplot(2,3,4)
+    all_probs = np.array(all_probs)
+    plot_roc_curve(all_labels,all_probs)
+
+
+    #绘制F1分数
+    plt.subplot(2,3,5)
+    plt.plot(f1_scores,label='F1 Score',color='purple')
+    plt.title('F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+def train_model_adam_constwarm(checkpoint, num_epoch, learning_rate, batch_size, accumulation_steps):
+
+    # **************************初始化训练对象***************************
+    # 加载数据集
+    train_set, valid_set = load_data()
+    # 初始化模型
+    estimator = AutoModelForSequenceClassification.from_pretrained(checkpoint,
+                                                               num_classes=3)
+
+    # 动态学习率
+    # scheduler = LinearDecayWithWarmup(learning_rate=learning_rate,
+    #                                     total_steps=len(train_set)*num_epoch,
+    #                                     warmup=0.1
+    #                                     )
+    scheduler = ConstScheduleWithWarmup(learning_rate=learning_rate,
+                                    total_steps=len(train_set)*num_epoch,
+                                    warmup=0.1
+                                    )
+    # 优化方法
+    optimizer = AdamW(parameters=estimator.parameters(),
+                      learning_rate=scheduler,weight_decay=0.1)
+    # 损失函数
+    criterion = CrossEntropyLoss(use_softmax=True)
+    # 评估方法
+    metric = Accuracy()
+    # 初始化存储数组
+    train_losses = []
+    valid_losses = []
+    valid_accuracies = []
+    f1_scores = []
+    auc_scores = []
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    custom_dropout = CustomDropoutLayer(dropout_prob=0.5)
+    # 训练逻辑
+    for epoch_idx in range(num_epoch):
+
+        # **************************训练集训练*************************
+        optimizer.clear_grad()
+        progress = tqdm(range(len(train_set)),
+                        desc='epoch %2d' % (epoch_idx + 1))
+        total_loss = 0.0  # 轮次损失
+        stage_loss = 0.0  # 阶段损失
+        for iter_idx, (batch_inputs, batch_labels) in enumerate(train_set):
+            batch_inputs = custom_dropout(batch_inputs)
+            # 模型计算
+            outputs = estimator(**batch_inputs)
+            # 损失计算
+            loss = criterion(outputs, batch_labels)
+            # 训练信息
+            total_loss += loss.item() * len(batch_labels)
+            stage_loss += loss.item() * len(batch_labels)
+            # 梯度计算
+            (loss / accumulation_steps).backward()
+
+            # 参数更新
+            if iter_idx % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.clear_grad()
+                progress.set_description('epoch % 2d stage loss %.5f'
+                                         % (epoch_idx + 1, stage_loss))
+                stage_loss = 0.0
+            # 学习率更新
+            scheduler.step()
+            # 进度条更新
+            progress.update()
+
+        # 设置轮次损失
+        progress.set_description('epoch % 2d total loss %.5f'
+                                 % (epoch_idx + 1, total_loss))
+        average_loss = total_loss / len(train_set)
+        train_losses.append(average_loss)
+        # 关闭进度条
+        progress.close()
+
+        # **************************验证集评估*************************
+        with paddle.no_grad():
+            total_valid_loss = 0
+            progress = tqdm(range(len(valid_set)), desc='evaluate')
+            metric.reset()
+
+            for iter_idx, (batch_inputs, batch_labels) in enumerate(valid_set):
+                # 模型计算
+                outputs = estimator(**batch_inputs)
+                loss = criterion(outputs,batch_labels)
+                total_valid_loss += loss.item()* len(batch_labels)
+                # 计算概率
+                probas = F.softmax(outputs)
+                #获取预测标签
+                preds = paddle.argmax(probas,axis=1)
+                #保存预测和真实标签
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.numpy())
+                all_probs.extend(probas.numpy())
+                # 标签预测
+                correct = metric.compute(probas, batch_labels)
+                metric.update(correct)
+                
+                # 进度条更新
+                progress.update()
+
+            f1 = f1_score(all_labels,all_preds,average='weighted')
+            f1_scores.append(f1)
+
+            # 设置轮次损失
+            acc = metric.accumulate()
+            valid_accuracies.append(acc)
+            average_valid_loss = total_valid_loss / len(valid_set)
+            valid_losses.append(average_valid_loss)
+            progress.set_description('evaluate acc %.3f' % acc)
+            
+            progress.set_description('evaluate valid_loss %.3f' % total_valid_loss)
+
+            # 关闭进度条
+            progress.close()
+
+            #模型保存
+            model_params = {
+            'checkpoint': checkpoint,
+            'num_epoch': num_epoch,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'accumulation_steps': accumulation_steps,
+            'train_loss': train_losses,
+            'valid_loss': valid_losses,
+            'valid_accuracy': valid_accuracies,
+            'f1_score': f1_scores,
+            }
+            model_save_dir = 'model/saved_parameters'
+            paddle.save(model_params,f'{model_save_dir}_{checkpoint}_lr{learning_rate}_bs{batch_size}_epochs{num_epoch}.pdparams')
+
+
+    # 在函数的最后，绘制损失和准确率图像
+    plt.figure(figsize=(16, 8))
+
+    # 绘制训练损失图像
+    plt.subplot(2, 3, 1)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(valid_losses,label='Validation Loss',linestyle='--')
+    plt.title('Training and Validation Loss Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # 绘制验证准确率图像
+    plt.subplot(2, 3, 2)
+    plt.plot(valid_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    #绘制混淆矩阵
+    plt.subplot(2,3,3)
+    cm =confusion_matrix(all_labels,all_preds)
+    sns.heatmap(cm,annot=True,fmt="d",cmap="Blues",xticklabels=['Negative_preds', 'Middle_preds', 'Positive_preds'], yticklabels=['Negative_actual', 'Middle_actual', 'Positive_actual'])
+    plt.xticks(rotation=45) 
+    plt.yticks(rotation=45)
+    
+    #绘制ROC曲线
+    plt.subplot(2,3,4)
+    all_probs = np.array(all_probs)
+    plot_roc_curve(all_labels,all_probs)
+
+
+    #绘制F1分数
+    plt.subplot(2,3,5)
+    plt.plot(f1_scores,label='F1 Score',color='purple')
+    plt.title('F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+def train_model_SGD(checkpoint, num_epoch, learning_rate, batch_size, accumulation_steps):
+
+    # **************************初始化训练对象***************************
+    # 加载数据集
+    train_set, valid_set = load_data()
+    # 初始化模型
+    estimator = AutoModelForSequenceClassification.from_pretrained(checkpoint,
+                                                               num_classes=3)
+
+    # 动态学习率
+    scheduler = LinearDecayWithWarmup(learning_rate=learning_rate,
+                                        total_steps=len(train_set)*num_epoch,
+                                        warmup=0.1
+                                        )
+    # 优化方法
+    optimizer = Momentum(learning_rate=scheduler, parameters=estimator.parameters(), weight_decay=0.1, momentum=0.9)
+    # 损失函数
+    criterion = CrossEntropyLoss(use_softmax=True)
+    # 评估方法
+    metric = Accuracy()
+    # 初始化存储数组
+    train_losses = []
+    valid_losses = []
+    valid_accuracies = []
+    f1_scores = []
+    auc_scores = []
+    all_preds = []
+    all_labels = []
+    all_probs = []
+
+    # 训练逻辑
+    for epoch_idx in range(num_epoch):
+
+        # **************************训练集训练*************************
+        optimizer.clear_grad()
+        progress = tqdm(range(len(train_set)),
+                        desc='epoch %2d' % (epoch_idx + 1))
+        total_loss = 0.0  # 轮次损失
+        stage_loss = 0.0  # 阶段损失
+        for iter_idx, (batch_inputs, batch_labels) in enumerate(train_set):
+            # 模型计算
+            outputs = estimator(**batch_inputs)
+            # 损失计算
+            loss = criterion(outputs, batch_labels)
+            # 训练信息
+            total_loss += loss.item() * len(batch_labels)
+            stage_loss += loss.item() * len(batch_labels)
+            # 梯度计算
+            (loss / accumulation_steps).backward()
+
+            # 参数更新
+            if iter_idx % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.clear_grad()
+                progress.set_description('epoch % 2d stage loss %.5f'
+                                         % (epoch_idx + 1, stage_loss))
+                stage_loss = 0.0
+            # 学习率更新
+            scheduler.step()
+            # 进度条更新
+            progress.update()
+
+        # 设置轮次损失
+        progress.set_description('epoch % 2d total loss %.5f'
+                                 % (epoch_idx + 1, total_loss))
+        average_loss = total_loss / len(train_set)
+        train_losses.append(average_loss)
+        # 关闭进度条
+        progress.close()
+
+        # **************************验证集评估*************************
+        with paddle.no_grad():
+            total_valid_loss = 0
+            progress = tqdm(range(len(valid_set)), desc='evaluate')
+            metric.reset()
+
+            for iter_idx, (batch_inputs, batch_labels) in enumerate(valid_set):
+                # 模型计算
+                outputs = estimator(**batch_inputs)
+                loss = criterion(outputs,batch_labels)
+                total_valid_loss += loss.item()* len(batch_labels)
+                # 计算概率
+                probas = F.softmax(outputs)
+                #获取预测标签
+                preds = paddle.argmax(probas,axis=1)
+                #保存预测和真实标签
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.numpy())
+                all_probs.extend(probas.numpy())
+                # 标签预测
+                correct = metric.compute(probas, batch_labels)
+                metric.update(correct)
+                
+                # 进度条更新
+                progress.update()
+
+            f1 = f1_score(all_labels,all_preds,average='weighted')
+            f1_scores.append(f1)
+
+            # 设置轮次损失
+            acc = metric.accumulate()
+            valid_accuracies.append(acc)
+            average_valid_loss = total_valid_loss / len(valid_set)
+            valid_losses.append(average_valid_loss)
+            progress.set_description('evaluate acc %.3f' % acc)
+            
+            progress.set_description('evaluate valid_loss %.3f' % total_valid_loss)
+
+            # 关闭进度条
+            progress.close()
+
+            #模型保存
+            model_params = {
+            'checkpoint': checkpoint,
+            'num_epoch': num_epoch,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'accumulation_steps': accumulation_steps,
+            'train_loss': train_losses,
+            'valid_loss': valid_losses,
+            'valid_accuracy': valid_accuracies,
+            'f1_score': f1_scores,
+            }
+            model_save_dir = 'model/saved_parameters'
+            paddle.save(model_params,f'{model_save_dir}_{checkpoint}_lr{learning_rate}_bs{batch_size}_epochs{num_epoch}.pdparams')
+
+
+    # 在函数的最后，绘制损失和准确率图像
+    plt.figure(figsize=(16, 8))
+
+    # 绘制训练损失图像
+    plt.subplot(2, 3, 1)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(valid_losses,label='Validation Loss',linestyle='--')
+    plt.title('Training and Validation Loss Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # 绘制验证准确率图像
+    plt.subplot(2, 3, 2)
+    plt.plot(valid_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    #绘制混淆矩阵
+    plt.subplot(2,3,3)
+    cm =confusion_matrix(all_labels,all_preds)
+    sns.heatmap(cm,annot=True,fmt="d",cmap="Blues",xticklabels=['Negative_preds', 'Middle_preds', 'Positive_preds'], yticklabels=['Negative_actual', 'Middle_actual', 'Positive_actual'])
+    plt.xticks(rotation=45) 
+    plt.yticks(rotation=45)
+    
+    #绘制ROC曲线
+    plt.subplot(2,3,4)
+    all_probs = np.array(all_probs)
+    plot_roc_curve(all_labels,all_probs)
+
+
+    #绘制F1分数
+    plt.subplot(2,3,5)
+    plt.plot(f1_scores,label='F1 Score',color='purple')
+    plt.title('F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+# 预训练模型参数
+# checkpoint = 'ernie-3.0-medium-zh'
+# checkpoint = 'bert-wwm-chinese'
+# checkpoint = 'gpt-cpm-large-cn'
+checkpoint = 'ernie-3.0-mini-zh'
+
+# %%
+train_model('ernie-3.0-mini-zh',10,2e-5,8,2)
+
+# %%
+train_model_SGD('ernie-3.0-medium-zh',20,1e-5,16,4)
+
+# %%
+train_model_adam('ernie-3.0-medium-zh',20,1e-5,128,2)
+
+# %%
+train_model_adam('ernie-3.0-nano-zh',10,1e-5,128,2)
+
+# %%
+train_model_adam('ernie-3.0-medium-zh',10,2e-5,16,2)
+
+# %%
+train_model_adam('ernie-3.0-nano-zh',10,1e-6,128,2) #不过拟合，但是学习太慢，效果太差
+
+# %%
+train_model_adam('ernie-3.0-nano-zh',10,1e-5,128,2)
+
+# %%
+train_model_adam('ernie-3.0-medium-zh',50,2e-6,128,2)
+
+# %%
+train_model_adam('ernie-3.0-medium-zh',10,1e-6,128,2)
+
+# %%
+train_model_adam_constwarm('ernie-3.0-medium-zh',100,1e-7,256,2)
+
+# %%
+train_model_adam('ernie-3.0-medium-zh',10,1e-6,128,2)
+
+# %%
+train_model_adam('ernie-3.0-medium-zh',10,1e-6,128,2)
+
+# %%
+train_model_adam_2('ernie-3.0-medium-zh',10,1e-6,128,2)
+
+# %%
+train_model_adam('ernie-3.0-mini-zh',20,2e-6,128,2)
+
+# %%
+train_model_adam_3('ernie-3.0-medium-zh',10,1e-6,128,2)
+
+# %%
+train_model_adam('ernie-3.0-mini-zh',20,2e-6,128,2)
+
+# %%
+def load_dataset1(data_path):
+    # 定义数据读取方式
+    def read(data_path):
+        with open(data_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                yield {'text': line.strip()}
+
+    # 使用MapDataset加载数据
+    return load_dataset(read, data_path=data_path, lazy=False)
+
+test = pd.read_csv("/home/aistudio/data/zssh000016.csv")
+test  = test.loc[:,'标题']
+test.to_csv("test.txt",sep='\t',index=False,header=False)
+
+# %%
+def train_model_adam_test(checkpoint, num_epoch, learning_rate, batch_size, accumulation_steps):
+
+    # **************************初始化训练对象***************************
+    # 加载数据集
+    train_set, valid_set = load_data()
+    # 初始化模型
+    estimator = AutoModelForSequenceClassification.from_pretrained(checkpoint,
+                                                               num_classes=3)
+
+    # 动态学习率
+    scheduler = LinearDecayWithWarmup(learning_rate=learning_rate,
+                                        total_steps=len(train_set)*num_epoch,
+                                        warmup=0.1
+                                        )
+    # scheduler = ConstScheduleWithWarmup(learning_rate=learning_rate,
+    #                                 total_steps=len(train_set)*num_epoch,
+    #                                 warmup=0.1
+    #                                 )
+    # 优化方法
+    optimizer = AdamW(parameters=estimator.parameters(),
+                      learning_rate=scheduler,weight_decay=0.1)
+    # 损失函数
+    criterion = CrossEntropyLoss(use_softmax=True)
+    # 评估方法
+    metric = Accuracy()
+    # 初始化存储数组
+    train_losses = []
+    valid_losses = []
+    valid_accuracies = []
+    f1_scores = []
+    auc_scores = []
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    custom_dropout = CustomDropoutLayer(dropout_prob=0.5)
+    # 训练逻辑
+    for epoch_idx in range(num_epoch):
+
+        # **************************训练集训练*************************
+        optimizer.clear_grad()
+        progress = tqdm(range(len(train_set)),
+                        desc='epoch %2d' % (epoch_idx + 1))
+        total_loss = 0.0  # 轮次损失
+        stage_loss = 0.0  # 阶段损失
+        for iter_idx, (batch_inputs, batch_labels) in enumerate(train_set):
+            batch_inputs = custom_dropout(batch_inputs)
+            # 模型计算
+            outputs = estimator(**batch_inputs)
+            # 损失计算
+            loss = criterion(outputs, batch_labels)
+            # 训练信息
+            total_loss += loss.item() * len(batch_labels)
+            stage_loss += loss.item() * len(batch_labels)
+            # 梯度计算
+            (loss / accumulation_steps).backward()
+
+            # 参数更新
+            if iter_idx % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.clear_grad()
+                progress.set_description('epoch % 2d stage loss %.5f'
+                                         % (epoch_idx + 1, stage_loss))
+                stage_loss = 0.0
+            # 学习率更新
+            scheduler.step()
+            # 进度条更新
+            progress.update()
+
+        # 设置轮次损失
+        progress.set_description('epoch % 2d total loss %.5f'
+                                 % (epoch_idx + 1, total_loss))
+        average_loss = total_loss / len(train_set)
+        train_losses.append(average_loss)
+        # 关闭进度条
+        progress.close()
+
+        # **************************验证集评估*************************
+        with paddle.no_grad():
+            total_valid_loss = 0
+            progress = tqdm(range(len(valid_set)), desc='evaluate')
+            metric.reset()
+
+            for iter_idx, (batch_inputs, batch_labels) in enumerate(valid_set):
+                # 模型计算
+                outputs = estimator(**batch_inputs)
+                loss = criterion(outputs,batch_labels)
+                total_valid_loss += loss.item()* len(batch_labels)
+                # 计算概率
+                probas = F.softmax(outputs)
+                #获取预测标签
+                preds = paddle.argmax(probas,axis=1)
+                #保存预测和真实标签
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.numpy())
+                all_probs.extend(probas.numpy())
+                # 标签预测
+                correct = metric.compute(probas, batch_labels)
+                metric.update(correct)
+                
+                # 进度条更新
+                progress.update()
+
+            f1 = f1_score(all_labels,all_preds,average='weighted')
+            f1_scores.append(f1)
+
+            # 设置轮次损失
+            acc = metric.accumulate()
+            valid_accuracies.append(acc)
+            average_valid_loss = total_valid_loss / len(valid_set)
+            valid_losses.append(average_valid_loss)
+            progress.set_description('evaluate acc %.3f' % acc)
+            
+            progress.set_description('evaluate valid_loss %.3f' % total_valid_loss)
+
+            # 关闭进度条
+            progress.close()
+
+            #模型保存
+            model_params = {
+            'checkpoint': checkpoint,
+            'num_epoch': num_epoch,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'accumulation_steps': accumulation_steps,
+            'train_loss': train_losses,
+            'valid_loss': valid_losses,
+            'valid_accuracy': valid_accuracies,
+            'f1_score': f1_scores,
+            }
+            model_save_dir = 'model1/senti-%d-%.5f' % (epoch_idx + 1, acc)
+            paddle.save(model_params,f'{model_save_dir}_model/senti_{checkpoint}_lr{learning_rate}_bs{batch_size}_epochs{num_epoch}.pdparams')
+            if not os.path.exists(model_save_dir):
+                os.makedirs(model_save_dir)
+            estimator.save_pretrained(model_save_dir)
+            tokenizer.save_pretrained(model_save_dir)
+            paddle.save(optimizer.state_dict(), os.path.join(model_save_dir, 'optimizer.optparams'))
+            paddle.save(scheduler.state_dict(), os.path.join(model_save_dir, 'scheduler.optparams'))
+
+    # 在函数的最后，绘制损失和准确率图像
+    plt.figure(figsize=(16, 8))
+
+    # 绘制训练损失图像
+    plt.subplot(2, 3, 1)
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(valid_losses,label='Validation Loss',linestyle='--')
+    plt.title('Training and Validation Loss Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # 绘制验证准确率图像
+    plt.subplot(2, 3, 2)
+    plt.plot(valid_accuracies, label='Validation Accuracy')
+    plt.title('Validation Accuracy Per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    #绘制混淆矩阵
+    plt.subplot(2,3,3)
+    cm =confusion_matrix(all_labels,all_preds)
+    sns.heatmap(cm,annot=True,fmt="d",cmap="Blues",xticklabels=['Negative_preds', 'Middle_preds', 'Positive_preds'], yticklabels=['Negative_actual', 'Middle_actual', 'Positive_actual'])
+    plt.xticks(rotation=45) 
+    plt.yticks(rotation=45)
+    
+    #绘制ROC曲线
+    plt.subplot(2,3,4)
+    all_probs = np.array(all_probs)
+    plot_roc_curve(all_labels,all_probs)
+
+
+    #绘制F1分数
+    plt.subplot(2,3,5)
+    plt.plot(f1_scores,label='F1 Score',color='purple')
+    plt.title('F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+train_model_adam_test('ernie-3.0-mini-zh',20,1e-6,64,2)
+
+# %%
+train_model_adam_test('ernie-3.0-mini-zh',10,1e-5,64,2)
+
+# %%
+def predict_to_csv():
+    # 获得模型名字
+    epoch_index = 7
+    model_name = glob.glob('model1/*')[epoch_index]  # 确保路径正确
+
+    # 读取模型
+    tokenizer = ErnieTokenizer.from_pretrained(model_name)
+    estimator = ErnieForSequenceClassification.from_pretrained(model_name)
+    estimator.eval()
+
+
+    # 获得测试集
+    def load_test(batch_size=16):
+        test = load_dataset1(data_path='test.txt')
+        def collate_fn(model_inputs):
+            return tokenizer(model_inputs['text'],
+                                    truncation=True,
+                                    max_length=510,
+                                    add_special_tokens=True,
+                                    return_tensors='pd'), model_inputs['text']
+        params = {'batch_size': None, 'collate_fn': collate_fn, 'shuffle': True}
+        return DataLoader(test, **params)
+    test_set = load_test()
+    results = []
+    with paddle.no_grad():
+        for model_inputs, input_texts in test_set:
+            outputs = estimator(**model_inputs)
+            probas = F.softmax(outputs, axis=1).numpy()
+            # 收集每个文本及其预测的数字标签
+            for text, proba in zip(input_texts, probas):
+                label_idx = proba.argmax()
+                results.append({'文本': text, '情感分类': label_idx})
+
+    # 将结果保存到CSV文件
+    df_results = pd.DataFrame(results)
+    df_results.to_csv('prediction_results.csv', index=False, encoding='utf_8_sig')
+
+# %%
+import glob
+from paddlenlp.transformers import ErnieTokenizer, ErnieForSequenceClassification
+from paddle.io import DataLoader
+import pandas as pd
+import paddle.nn.functional as F
+
+def collate_fn(batch):
+    # 假设batch是由字典组成的列表，每个字典都包含一个'text'键
+    texts = [data['text'] for data in batch]  # 提取文本
+    model_inputs = tokenizer(texts, truncation=True, max_length=510, add_special_tokens=True, return_tensors='pd')
+    return model_inputs, texts  # 返回处理后的输入和原始文本列表
+
+def predict_to_csv():
+    model_name = glob.glob('model1/*')[7]  # 根据具体情况调整索引
+
+    tokenizer = ErnieTokenizer.from_pretrained(model_name)
+    estimator = ErnieForSequenceClassification.from_pretrained(model_name)
+    estimator.eval()
+
+    def load_test(batch_size=16):
+        test = load_dataset1(data_path='test.txt')  # 确保此函数正确加载数据
+        params = {'batch_size': batch_size, 'collate_fn': collate_fn, 'shuffle': True}
+        return DataLoader(test, **params)
+
+    test_set = load_test()
+    results = []
+    with paddle.no_grad():
+        for model_inputs, input_texts in test_set:
+            outputs = estimator(**model_inputs)
+            probas = F.softmax(outputs, axis=1).numpy()
+            for text, proba in zip(input_texts, probas):
+                label_idx = proba.argmax()
+                results.append({'文本': text, '情感分类': label_idx})
+
+    df_results = pd.DataFrame(results)
+    df_results.to_csv('prediction_results.csv', index=False, encoding='utf_8_sig')
+
+# %%
+def predict_to_csv_plus():
+    model_files = glob.glob('model1/*')
+    if len(model_files) > 7:
+        model_name = model_files[7]  # 根据具体情况调整索引
+    else:
+        raise ValueError("Model index out of range.")
+
+    tokenizer = ErnieTokenizer.from_pretrained(model_name)
+    estimator = ErnieForSequenceClassification.from_pretrained(model_name)
+    estimator.eval()
+
+    class TextDataset(paddle.io.Dataset):
+        def __init__(self, file_path):
+            with open(file_path, 'r', encoding='utf-8') as file:
+                self.lines = [line.strip() for line in file if line.strip()]
+
+        def __len__(self):
+            return len(self.lines)
+
+        def __getitem__(self, idx):
+            return {'text': self.lines[idx]}
+    def collate_fn(batch):
+        texts = [data['text'] for data in batch]
+        model_inputs = tokenizer(texts, truncation=True, max_length=510, add_special_tokens=True, return_tensors='pd', padding=True)
+        return model_inputs, texts
+
+    def load_test(batch_size=16):
+        test = TextDataset(file_path='test.txt')
+        return DataLoader(test, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
+
+    test_set = load_test()
+    results = []
+    with paddle.no_grad():
+        for model_inputs, input_texts in test_set:
+            outputs = estimator(**model_inputs)
+            probas = paddle.nn.functional.softmax(outputs, axis=1)
+            preds = probas.argmax(axis=1).numpy()
+            for text, pred in zip(input_texts, preds):
+                results.append({'文本': text, '情感分类': pred})
+
+    df_results = pd.DataFrame(results)
+    df_results.to_csv('prediction_results.csv', index=False, encoding='utf_8_sig')
+
+# %%
+predict_to_csv_plus()
+
+# %%
+
+
+# %%
+predict_to_csv(model_dir='work/model1/senti-8-0.78465', text_file='/home/aistudio/work/test.txt')
+
+# %%
+for data in range(test_set,5):
+    print(data)
+
+# %%
+
+
+

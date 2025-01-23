@@ -1,0 +1,58 @@
+# %%
+import pandas as pd 
+import numpy as np 
+import jieba
+from tqdm import tqdm
+import re
+from sklearn.model_selection import train_test_split
+from aip import AipNlp
+import os
+import requests
+import time
+
+# %%
+df_last= pd.read_csv('data_all.csv')
+
+# %%
+df_last
+
+# %%
+keywords_to_remove = ["^新年快乐$", ".*2021收官晒收益啦.*",".*2022收官晒收益啦.*","^你$","^停$","^[a-zA-Z]$"
+,'^[\u4e00-\u9fa5]$',"^？+$","^~+$",'.*\{转载\}.*',".*\{转发\}",".*\{转文\}.*","^！+$","^_+$","^，+$"]
+df_last = df_last[~df_last["标题"].str.contains('|'.join(keywords_to_remove),case=False)]
+df_last = df_last[df_last['分词标题'].apply(lambda x: x!= '[]')]
+
+# %%
+df_last
+
+# %%
+df_last.to_csv("data_all.csv",index=False)
+
+# %%
+df_40 = df_last[df_last['标题'].apply(lambda x: len(x) == 40)]
+
+# %%
+def smart_truncate(text, max_length=40):
+    if len(text) == max_length and not re.search(r'[\，\。\；\：\]\？\！]$', text):
+        pattern = re.compile(r'[\，\。\；\？\]\！]')
+        matches = list(pattern.finditer(text))
+        if matches:
+            # 如果找到标点符号，则截断到最后一个标点符号
+            return text[:matches[-1].start() + 1]
+        else:
+            # 如果没有标点符号，保留原文
+            return text
+    else:
+        # 如果长度不为40或者最后一个字符是标点符号，保留原文
+        return text
+
+# %%
+df_last['标题'] = df_last['标题'].apply(smart_truncate)
+
+# %%
+df_last
+
+# %%
+df_last.to_csv("data_all.csv",index=False,encoding='utf_8_sig')
+
+
