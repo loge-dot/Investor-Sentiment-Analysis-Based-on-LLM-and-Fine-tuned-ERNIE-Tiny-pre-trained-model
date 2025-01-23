@@ -29,4 +29,4 @@ This project focuses on developing an efficient sentiment classification system 
 - Implement real-time sentiment analysis in applications.
 
 ## Contact
-For questions or collaborations, feel free to reach out at [your-email@example.com].
+For questions or collaborations, feel free to reach out at loge@connect.hku.hk
